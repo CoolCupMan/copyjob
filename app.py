@@ -35,6 +35,9 @@ def save(config):
 
 def background():
     config=load()
+    def log(message):
+        with (BASE/'copyjob.log').open('a',encoding='utf-8') as output:
+            output.write(datetime.now().isoformat(timespec='seconds')+' '+message+'\n')
     import ctypes
     from ctypes import wintypes
     kernel=ctypes.windll.kernel32
@@ -43,11 +46,9 @@ def background():
     handle=kernel.CreateMutexW(None,False,'Global\\CopyJob-monitor-'+config['instance_id'])
     if not handle:raise ctypes.WinError()
     if kernel.GetLastError()==183:
+        log('CopyJob '+VERSION+': another monitor is already running. If updating, Stop monitoring, wait for Background monitor stopped, then Start monitoring to use the new executable.')
         kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle(handle);return
-    def log(message):
-        with (BASE/'copyjob.log').open('a',encoding='utf-8') as output:
-            output.write(datetime.now().isoformat(timespec='seconds')+' '+message+'\n')
-    log('Background monitor started; configuration reloads every 3 seconds.')
+    log('Background monitor started: CopyJob '+VERSION+'; PID '+str(os.getpid()))
     try:win.watch(BASE,threading.Event(),log)
     finally:
         kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle(handle)

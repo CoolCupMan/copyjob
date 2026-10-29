@@ -77,8 +77,24 @@ def register_task(exe,config,remove=False):
         "Start-ScheduledTask -TaskName "+psquote(name))
     return powershell(script)
 
+def native_command(command,environment,log,cancelled):
+    with subprocess.Popen(command,env=environment,creationflags=NO_WINDOW,stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace') as process:
+        def stop_when_cancelled():
+            while process.poll() is None:
+                if cancelled.wait(.25):
+                    if process.poll() is None:process.terminate()
+                    return
+        threading.Thread(target=stop_when_cancelled,daemon=True).start()
+        for line in process.stdout:log(line.rstrip())
+        code=process.wait()
+    if cancelled.is_set():raise InterruptedError('Copy cancelled; completed files are retained.')
+    return code
+
 def _run_job(job,volumes,log,cancelled):
     source,destination=prepare_job(job,volumes)
+    from core import VERSION
+    log(job['name']+': CopyJob '+VERSION+'; layout = '+job.get('layout','folder'))
     log(job['name']+': source = '+source)
     log(job['name']+': destination = '+destination)
     validate(source,destination)
@@ -97,26 +113,34 @@ def _run_job(job,volumes,log,cancelled):
         log(job['name']+': starting selected PowerShell script (existing execution policy applies).')
     elif engine=='xcopy':
         flags=xcopy_flags(job)
-        Path(destination).mkdir(parents=True,exist_ok=True)
+        switches={flag.upper() for flag in flags}
+        if '/L' not in switches:
+            Path(destination).mkdir(parents=True,exist_ok=True)
+            if '/E' in switches and '/T' not in switches:
+                log(job['name']+': creating source folder and directory hierarchy (including empty folders).')
+                tree_command=['xcopy.exe',source,destination.rstrip('\\')+'\\',*flags,'/T']
+                tree_code=native_command(tree_command,environment,log,cancelled)
+                if tree_code not in (0,1):
+                    raise RuntimeError(f'Directory creation failed: XCOPY exit {tree_code}; file copy was not started.')
+                log(job['name']+': directory hierarchy prepared at '+destination)
         command=['xcopy.exe',source,destination.rstrip('\\')+'\\',*flags]
         log(f'{job["name"]}: XCOPY '+ ' '.join(flags))
     else:raise ValueError('Unsupported job engine: '+engine)
-    with subprocess.Popen(command,env=environment,creationflags=NO_WINDOW,stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace') as process:
-        def stop_when_cancelled():
-            while process.poll() is None:
-                if cancelled.wait(.25):
-                    if process.poll() is None:process.terminate()
-                    return
-        threading.Thread(target=stop_when_cancelled,daemon=True).start()
-        for line in process.stdout:log(line.rstrip())
-        code=process.wait()
-    if cancelled.is_set():raise InterruptedError('Copy cancelled; completed files are retained.')
+    code=native_command(command,environment,log,cancelled)
     if engine=='powershell':
         log(f'{job["name"]}: PowerShell exit {code}')
         return code==0
     meanings={0:'Files copied',1:'No matching files',2:'Cancelled',4:'Initialization or syntax error',5:'Disk write error'}
     log(f'{job["name"]}: XCOPY exit {code} — {meanings.get(code,"Unexpected result")}')
+    if code in (0,1) and '/L' not in {f.upper() for f in flags}:
+        if not Path(destination).is_dir():raise RuntimeError('Destination directory is missing after XCOPY: '+destination)
+        log(job['name']+': destination folder confirmed: '+str(Path(destination)))
+        with os.scandir(destination) as entries:
+            names=[]
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):names.append(entry.name)
+                if len(names)>=10:break
+        log(job['name']+': destination subfolders (up to 10): '+(', '.join(names) if names else '(none — source root may be empty)'))
     return code in (0,1)
 
 def run_job(job,volumes,log,cancelled):

@@ -29,10 +29,16 @@ with tempfile.TemporaryDirectory() as temporary:
     app.win.inventory=lambda:{normalize_volume(volume_id):dict(DeviceID=volume_id,DriveLetter=source.drive,Label='Test',Disks=[dict(SerialNumber='TESTDISK',InterfaceType='USB')])}
     original_popen=subprocess.Popen
     monitor_requests=[]
+    copy_phases=[]
     def popen(command,*args,**kwargs):
         if '--background' in command:
             monitor_requests.append(command)
             return None
+        if command[0].lower()=='xcopy.exe':
+            if '/T' in command:copy_phases.append('tree')
+            else:
+                assert (destination/source.name/'empty').is_dir() and (destination/source.name/'nested').is_dir(),'Directory phase must retain empty and nested folders before copying files'
+                copy_phases.append('files')
         return original_popen(command,*args,**kwargs)
     subprocess.Popen=popen
     original=tk.Tk
@@ -62,5 +68,6 @@ with tempfile.TemporaryDirectory() as temporary:
     try:app.main()
     finally:subprocess.Popen=original_popen
     assert state['done'],'GUI did not produce expected copy'
+    assert copy_phases==['tree','files'],'XCOPY must prepare directories before copying files'
     assert len(monitor_requests)==1,'Saving an enabled job must start monitoring once; manual copy must not start another monitor'
     print('PASS: full paths + selected volume -> GUI save normalization and monitor launch -> native XCOPY -> source folder, nested files and empty directory retained')

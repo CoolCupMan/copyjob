@@ -1,4 +1,4 @@
-# CopyJob 1.3.0 — volume-aware Windows backup jobs
+# CopyJob 1.3.1 — volume-aware Windows backup jobs
 
 Application ID: `org.copyjob.desktop`. Each installation has an independent UUID,
 configuration, log and scheduled task. Intended platform: Windows 10/11 with Windows
@@ -64,6 +64,16 @@ disconnect/reconnect occurs entirely between inventory scans, polling alone can 
 
 ## Folder hierarchy
 
+With `/E`, XCOPY now first runs a directory-only phase (`/T` with the same
+configured switches), then copies file contents into that existing tree. This
+explicitly prepares empty and nested folders before file copying begins. A failed
+directory phase stops the job with its exit code. `/L` remains a preview without
+creating directories, and an explicitly selected `/T` remains directory-only.
+The log confirms the actual destination folder and lists its immediate subfolders.
+Each job also logs the running CopyJob version and layout, so an old background
+worker can be distinguished from an updated settings window. When updating, stop
+the old monitor and wait for its stopped message before starting the new one.
+
 The default **Source folder and contents** layout copies the selected source folder
 itself, including its subdirectories and files, into the destination parent. Example:
 
@@ -116,7 +126,7 @@ Letter enforcement can conflict with third-party letter managers: choose one des
 mapping. Assignment does not format, unlock or decrypt disks. Reformatting a volume
 may change its GUID, requiring updated settings. Re-export and rerun the admin setup
 when changing preferred mappings; editing JSON alone does not update the SYSTEM task.
-Preferred-letter bindings exported in 1.3.0 also preserve the saved physical disk
+Preferred-letter bindings exported in 1.3.1 also preserve the saved physical disk
 filters; the assignment task checks them before changing a letter. Unmounted volumes
 with physical filters additionally require the Windows Storage `Get-Partition` cmdlet.
 The one-time **Assign trigger letter…** button requests UAC and immediately assigns
