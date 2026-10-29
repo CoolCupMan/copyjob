@@ -90,6 +90,22 @@ def prepare_job(job,volumes):
     if common in (a,b):raise ValueError('Source and destination must be separate non-nested folders.')
     return source,destination
 
+def trigger_signature(job,volumes,root_available):
+    """Only drive identity/letter determines a new automatic trigger."""
+    identity=normalize_volume(job.get('trigger_volume','') or job.get('destination_volume',''))
+    if identity:
+        volume=volumes.get(identity)
+        letter=volume.get('DriveLetter') if volume else None
+        return (identity,letter.upper()) if letter else None
+    # Legacy fixed-path jobs follow destination drive availability, not its folder.
+    path=clean_folder(job['destination'])
+    drive,_=ntpath.splitdrive(path)
+    if not drive or not ntpath.isabs(path):raise ValueError('Destination needs a full drive path or a volume ID.')
+    root=drive+'\\'
+    if not root_available(root):return None
+    identity=next((id for id,v in volumes.items() if (v.get('DriveLetter') or '').casefold()==drive.casefold()),drive.casefold())
+    return (identity,drive.upper())
+
 class Scheduler:
     """One run per availability/mapping transition; failures retry, successes stay idle."""
     def __init__(self):self.states={}

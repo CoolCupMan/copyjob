@@ -26,7 +26,7 @@ if ($task.Principal.RunLevel -notin @(0,'Limited') -or $task.Principal.LogonType
 }
 $filter = Set-WmiInstance -Namespace $ns -Class __EventFilter -Arguments @{
     Name=$name; EventNamespace='root\cimv2'; QueryLanguage='WQL'
-    Query="SELECT * FROM __InstanceOperationEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_LogicalDisk'"
+    Query="SELECT * FROM __InstanceCreationEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_LogicalDisk'"
 }
 $exe = Join-Path $env:SystemRoot 'System32\schtasks.exe'
 try {

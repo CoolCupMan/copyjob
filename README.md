@@ -1,4 +1,4 @@
-# CopyJob 1.1.1 — volume-aware Windows backup jobs
+# CopyJob 1.1.2 — volume-aware Windows backup jobs
 
 Application ID: `org.copyjob.desktop`. Each installation has an independent UUID,
 configuration, log and scheduled task. Intended platform: Windows 10/11 with Windows
@@ -31,7 +31,11 @@ PowerShell 5.1, WMI/CIM and Task Scheduler. The application is unsigned.
 The monitor reads saved settings and WMI `Win32_Volume` inventory every three seconds.
 It waits for drive-letter assignment by Windows or third-party tools, then resolves
 paths from GUIDs. Already-present volumes are checked after login/restart too. A job
-runs once per availability/mapping/configuration transition; failed jobs retry after
+runs once when its selected trigger volume becomes available or changes drive letter.
+Source/destination file contents, folder existence changes, copy options and folder-path
+edits do not retrigger a successful job while that trigger drive remains connected.
+With no explicit trigger volume, the destination volume/drive is used. Existing drives
+are checked once when the monitor starts after login/restart; failed jobs retry after
 the configured interval. Jobs within one monitor run sequentially. A per-job named
 mutex prevents the same job running simultaneously from the GUI and the monitor.
 Use separate destinations for independent jobs/instances; different jobs targeting
@@ -48,7 +52,9 @@ startup, then run the exported script in **Windows PowerShell 5.1 as administrat
 ```
 
 Normal PowerShell execution policy applies; no bypass is installed. The permanent
-local WMI filter watches `__InstanceOperationEvent` for `Win32_LogicalDisk` changes.
+local WMI filter watches `__InstanceCreationEvent` for new `Win32_LogicalDisk` instances (drive arrival / letter assignment), ignoring
+free-space updates caused by folder-content changes. After upgrading, re-export and
+rerun WMI setup to update an existing permanent filter.
 Its consumer only invokes Windows `schtasks.exe /Run` for this instance's limited user
 task. It does not execute the user's EXE/scripts as SYSTEM. Existing unrelated WMI
 consumers, including the supplied `TestConsumer`, are left unchanged. If those still

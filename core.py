@@ -3,7 +3,7 @@ from pathlib import Path
 import shutil
 import uuid
 
-VERSION = '1.1.1'
+VERSION = '1.1.2'
 APP_ID = 'org.copyjob.desktop'
 
 

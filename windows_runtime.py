@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from automation import normalize_volume,prepare_job,xcopy_flags,Scheduler
+from automation import normalize_volume,prepare_job,xcopy_flags,Scheduler,trigger_signature
 from core import copy_job,validate
 
 NO_WINDOW=0x08000000 if os.name=='nt' else 0
@@ -141,16 +141,10 @@ def watch(base,stop,log):
                 if not job.get('enabled'):
                     scheduler.states.pop(job['id'],None);continue
                 try:
-                    source,destination=prepare_job(job,volumes)
-                    # Check both roots; destination subfolder may not exist yet.
-                    ready=Path(source).is_dir() and Path(Path(destination).anchor).is_dir()
-                    mapping=tuple((key,volumes.get(normalize_volume(job.get(key,'')),{}).get('DriveLetter')) for key in ('trigger_volume','source_volume','destination_volume'))
-                    signature=(source,destination,mapping,json.dumps(job,sort_keys=True)) if ready else None
-                except FileNotFoundError:signature=None
+                    signature=trigger_signature(job,volumes,lambda root:Path(root).is_dir())
                 except Exception as exc:
                     if job_errors.get(job['id'])!=str(exc):log(job['name']+': '+str(exc))
                     job_errors[job['id']]=str(exc)
-                    scheduler.states.pop(job['id'],None)
                     continue
                 if scheduler.due(job,signature):
                     try:success=run_job(job,volumes,log,stop)
