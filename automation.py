@@ -10,7 +10,7 @@ FLAGS = ['A','M','D','S','E','V','W','C','I','Q','F','L','G','H','R','T','U','K'
 
 def new_job():
     return dict(id=str(uuid.uuid4()), name='New copy job', enabled=False,
-                trigger_volume='', source_volume='', destination_volume='', source='',
+                trigger_volume='', trigger_serial='', trigger_interface='', source_volume='', destination_volume='', source='',
                 destination='', engine='xcopy', flags=['E','I','H','K','Y'],
                 extra_flags='', script_path='', preferred_letter='', delay=3, retry_seconds=60)
 
@@ -82,6 +82,8 @@ def prepare_job(job,volumes):
     trigger=normalize_volume(job.get('trigger_volume',''))
     if trigger and (trigger not in volumes or not volumes[trigger].get('DriveLetter')):
         raise FileNotFoundError('Waiting for trigger volume / drive letter.')
+    if (job.get('trigger_serial') or job.get('trigger_interface')) and not trigger_signature(job,volumes,lambda _:True):
+        raise FileNotFoundError('Trigger volume is absent or disk serial/interface does not match.')
     source=resolve_path(job['source'],job.get('source_volume',''),volumes)
     destination=resolve_path(job['destination'],job.get('destination_volume',''),volumes)
     a,b=ntpath.normcase(ntpath.normpath(source)),ntpath.normcase(ntpath.normpath(destination))
@@ -90,13 +92,25 @@ def prepare_job(job,volumes):
     if common in (a,b):raise ValueError('Source and destination must be separate non-nested folders.')
     return source,destination
 
+def disk_matches(job,volume):
+    serial=job.get('trigger_serial','').strip().casefold()
+    interface=job.get('trigger_interface','').strip().casefold()
+    if not serial and not interface:return True
+    disks=volume.get('Disks') or []
+    if isinstance(disks,dict):disks=[disks]
+    return any((not serial or str(d.get('SerialNumber') or '').strip().casefold()==serial)
+               and (not interface or str(d.get('InterfaceType') or '').strip().casefold()==interface)
+               for d in disks)
+
 def trigger_signature(job,volumes,root_available):
     """Only drive identity/letter determines a new automatic trigger."""
     identity=normalize_volume(job.get('trigger_volume','') or job.get('destination_volume',''))
     if identity:
         volume=volumes.get(identity)
         letter=volume.get('DriveLetter') if volume else None
-        return (identity,letter.upper()) if letter else None
+        return (identity,letter.upper()) if letter and disk_matches(job,volume) else None
+    if job.get('trigger_serial','').strip() or job.get('trigger_interface','').strip():
+        raise ValueError('Select a trigger Volume-ID when using disk-serial or interface filters.')
     # Legacy fixed-path jobs follow destination drive availability, not its folder.
     path=clean_folder(job['destination'])
     drive,_=ntpath.splitdrive(path)

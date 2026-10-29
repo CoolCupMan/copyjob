@@ -19,10 +19,30 @@ def powershell(script,timeout=30):
 
 def psquote(value):return "'"+str(value).replace("'","''")+"'"
 
+INVENTORY_SCRIPT = r"""
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new()
+$byLetter=@{}
+foreach($disk in @(Get-CimInstance Win32_DiskDrive)) {
+    $info=@{SerialNumber=([string]$disk.SerialNumber).Trim();InterfaceType=[string]$disk.InterfaceType;Model=[string]$disk.Model;DeviceID=[string]$disk.DeviceID}
+    foreach($partition in @(Get-CimAssociatedInstance -InputObject $disk -Association Win32_DiskDriveToDiskPartition)) {
+        foreach($logical in @(Get-CimAssociatedInstance -InputObject $partition -Association Win32_LogicalDiskToPartition)) {
+            $letter=[string]$logical.DeviceID
+            if(!$byLetter.ContainsKey($letter)){$byLetter[$letter]=@()}
+            $byLetter[$letter]+=$info
+        }
+    }
+}
+$volumes=@(Get-CimInstance Win32_Volume | ForEach-Object {
+    $disks=@()
+    if($_.DriveLetter -and $byLetter.ContainsKey([string]$_.DriveLetter)){$disks=@($byLetter[[string]$_.DriveLetter])}
+    [PSCustomObject]@{DeviceID=$_.DeviceID;DriveLetter=$_.DriveLetter;Label=$_.Label;DriveType=$_.DriveType;FileSystem=$_.FileSystem;BootVolume=$_.BootVolume;SystemVolume=$_.SystemVolume;Disks=$disks}
+})
+ConvertTo-Json -InputObject $volumes -Depth 6 -Compress
+"""
+
 def inventory():
-    text=powershell("[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); @("+
-        "Get-CimInstance Win32_Volume | Select-Object DeviceID,DriveLetter,Label,DriveType,FileSystem,BootVolume,SystemVolume"+
-        ") | ConvertTo-Json -Compress")
+    text=powershell(INVENTORY_SCRIPT)
     rows=json.loads(text or '[]')
     if isinstance(rows,dict):rows=[rows]
     return {normalize_volume(row['DeviceID']):row for row in rows}
@@ -126,31 +146,48 @@ def run_job(job,volumes,log,cancelled):
         if acquired:kernel.ReleaseMutex(handle)
         kernel.CloseHandle(handle)
 
-def watch(base,stop,log):
+def watch(base,stop,log,event_source=None):
+    from drive_events import DriveEvents
     scheduler=Scheduler()
     last_error=None
     job_errors={}
-    while not stop.is_set():
-        try:
-            config=json.loads((base/'instance.json').read_text(encoding='utf-8'))
-            if (base/'pause-background').exists():
-                stop.wait(3);continue
-            volumes=inventory()
-            for job in config.get('jobs',[]):
-                if stop.is_set():break
-                if not job.get('enabled'):
-                    scheduler.states.pop(job['id'],None);continue
-                try:
-                    signature=trigger_signature(job,volumes,lambda root:Path(root).is_dir())
-                except Exception as exc:
-                    if job_errors.get(job['id'])!=str(exc):log(job['name']+': '+str(exc))
-                    job_errors[job['id']]=str(exc)
-                    continue
-                if scheduler.due(job,signature):
-                    try:success=run_job(job,volumes,log,stop)
-                    except Exception as exc:log(job['name']+': '+str(exc));success=False
-                    scheduler.finish(job,success)
-            last_error=None
-        except Exception as exc:
-            if str(exc)!=last_error:log('Monitor: '+str(exc));last_error=str(exc)
-        stop.wait(3)
+    observations={}
+    last_mode=None
+    events=event_source or DriveEvents(log)
+    events.start()
+    try:
+        while not stop.is_set() and not (base/'stop-background').exists():
+            try:
+                config=json.loads((base/'instance.json').read_text(encoding='utf-8'))
+                paused=(base/'pause-background').exists()
+                mode='paused — use Pause / resume background to resume' if paused else str(sum(bool(j.get('enabled')) for j in config.get('jobs',[])))+' enabled automatic job(s)'
+                if mode!=last_mode:log('Monitor: '+mode);last_mode=mode
+                if paused:
+                    stop.wait(1);continue
+                volumes=inventory()
+                for job in config.get('jobs',[]):
+                    if stop.is_set():break
+                    if not job.get('enabled'):
+                        scheduler.states.pop(job['id'],None);continue
+                    try:
+                        signature=trigger_signature(job,volumes,lambda root:Path(root).is_dir())
+                        if signature:signature=(*signature,events.generation(signature[1]))
+                    except Exception as exc:
+                        if job_errors.get(job['id'])!=str(exc):log(job['name']+': '+str(exc))
+                        job_errors[job['id']]=str(exc)
+                        continue
+                    if observations.get(job['id'],'unseen')!=signature:
+                        observations[job['id']]=signature
+                        log(job['name']+(': trigger matched '+signature[1] if signature else ': waiting for trigger volume, letter and configured disk serial/interface.'))
+                    if scheduler.due(job,signature):
+                        log(job['name']+': automatic copy starting.')
+                        try:success=run_job(job,volumes,log,stop)
+                        except Exception as exc:log(job['name']+': '+str(exc));success=False
+                        scheduler.finish(job,success)
+                last_error=None
+            except Exception as exc:
+                if str(exc)!=last_error:log('Monitor: '+str(exc));last_error=str(exc)
+            stop.wait(1)
+    finally:
+        events.close()
+        log('Background monitor stopped.')

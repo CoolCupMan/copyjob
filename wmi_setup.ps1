@@ -62,6 +62,23 @@ while ($true) {
         foreach ($binding in $bindings) {
             $volume=$volumes | Where-Object DeviceID -EQ $binding.volume
             if (!$volume -or $volume.BootVolume -or $volume.SystemVolume) { continue }
+            if ($binding.serial -or $binding.interface) {
+                $physical=@()
+                if ($volume.DriveLetter) {
+                    $logical=Get-CimInstance Win32_LogicalDisk | Where-Object DeviceID -EQ $volume.DriveLetter
+                    foreach ($partition in @(Get-CimAssociatedInstance -InputObject $logical -Association Win32_LogicalDiskToPartition)) {
+                        $physical+=@(Get-CimAssociatedInstance -InputObject $partition -Association Win32_DiskDriveToDiskPartition)
+                    }
+                } else {
+                    $numbers=@(Get-Partition | Where-Object { $_.AccessPaths -contains $volume.DeviceID } | Select-Object -ExpandProperty DiskNumber)
+                    $physical=@(Get-CimInstance Win32_DiskDrive | Where-Object { $numbers -contains $_.Index })
+                }
+                $matched=@($physical | Where-Object {
+                    (!$binding.serial -or ([string]$_.SerialNumber).Trim() -eq $binding.serial) -and
+                    (!$binding.interface -or ([string]$_.InterfaceType).Trim() -eq $binding.interface)
+                })
+                if (!$matched.Count) { continue }
+            }
             if ($volume.DriveLetter -eq $binding.letter) { continue }
             $occupied=$volumes | Where-Object DriveLetter -EQ $binding.letter
             if (!$occupied) {
@@ -77,7 +94,7 @@ while ($true) {
 '@
     $payload=$payload.Replace('__DATA__',$assignmentData)
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
-    $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell1.0\powershell.exe') -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+$encoded)
+    $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+$encoded)
     $trigger=New-ScheduledTaskTrigger -AtStartup
     $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries

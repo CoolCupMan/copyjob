@@ -54,23 +54,26 @@ def background():
 
 def main():
     config=load();save(config)
-    root=tk.Tk();root.title(f'CopyJob {VERSION} — {config["instance_id"][:8]}');root.geometry('1100x860')
+    root=tk.Tk();root.title(f'CopyJob {VERSION} — {config["instance_id"][:8]}');root.geometry('1250x960')
     events=queue.Queue();cancelled=threading.Event();busy=False;closing=False
+    log_path=BASE/'copyjob.log'
+    log_offset=max(0,log_path.stat().st_size-65536) if log_path.exists() else 0
     volumes={};options={'Fixed path / no volume ID':''};selected=None
     frame=ttk.Frame(root,padding=12);frame.pack(fill='both',expand=True)
     ttk.Label(frame,text=f'CopyJob {VERSION} | Instance {config["instance_id"]}').pack(anchor='w')
     ttk.Label(frame,text='Background setup is explicit. Jobs run after sign-in and reconnect, including drive-letter changes.').pack(anchor='w')
     bar=ttk.Frame(frame);bar.pack(fill='x',pady=4)
     jobs=tk.Listbox(frame,height=4,exportselection=False);jobs.pack(fill='x')
-    vars={key:tk.StringVar() for key in ['name','source','destination','trigger_volume','source_volume','destination_volume','engine','delay','retry_seconds','extra_flags','script_path','preferred_letter']}
+    vars={key:tk.StringVar() for key in ['name','source','destination','trigger_volume','source_volume','destination_volume','engine','delay','retry_seconds','extra_flags','script_path','preferred_letter','trigger_serial','trigger_interface']}
     enabled=tk.BooleanVar();flagvars={flag:tk.BooleanVar() for flag in FLAGS}
     vars['engine'].set('xcopy');vars['delay'].set('3');vars['retry_seconds'].set('60')
     controls=ttk.Frame(frame);controls.pack(fill='x')
     volume_boxes=[]
-    for row,(label,key) in enumerate([('Job name','name'),('Trigger volume','trigger_volume'),('Source volume','source_volume'),('Source folder','source'),('Destination volume','destination_volume'),('Destination folder','destination'),('Optional PS1 script','script_path'),('Preferred trigger letter','preferred_letter')]):
+    for row,(label,key) in enumerate([('Job name','name'),('Trigger volume','trigger_volume'),('Trigger disk serial','trigger_serial'),('Trigger interface','trigger_interface'),('Source volume','source_volume'),('Source folder','source'),('Destination volume','destination_volume'),('Destination folder','destination'),('Optional PS1 script','script_path'),('Preferred trigger letter','preferred_letter')]):
         ttk.Label(controls,text=label,width=20).grid(row=row,column=0,sticky='w',pady=2)
         if key.endswith('volume'):
             widget=ttk.Combobox(controls,textvariable=vars[key],width=95,values=list(options));volume_boxes.append(widget)
+        elif key=='trigger_interface':widget=ttk.Combobox(controls,textvariable=vars[key],values=['','USB','SCSI','IDE','1394'],width=95)
         else:widget=ttk.Entry(controls,textvariable=vars[key],width=95)
         widget.grid(row=row,column=1,sticky='ew')
         if key in ('source','destination'):
@@ -120,7 +123,30 @@ def main():
         nonlocal selected
         if selected is not None and messagebox.askyesno('Delete job','Remove this job configuration?'):
             config['jobs'].pop(selected);selected=None;save(config);names()
-    def store():
+    def start_monitor():
+        try:
+            import subprocess
+            (BASE/'stop-background').unlink(missing_ok=True)
+            command=[sys.executable,'--background'] if getattr(sys,'frozen',False) else [sys.executable,str(Path(__file__).resolve()),'--background']
+            subprocess.Popen(command,creationflags=win.NO_WINDOW,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            log('Background monitor requested. Enable login startup to restore monitoring after reboot.')
+        except Exception as exc:error(exc)
+    def stop_monitor():
+        (BASE/'stop-background').touch()
+        log('Monitor stop requested; an active copy finishes first. Start monitoring or save an enabled job to resume.')
+    def selected_disk():
+        value=options.get(vars['trigger_volume'].get(),vars['trigger_volume'].get())
+        try:
+            disks=volumes.get(normalize_volume(value),{}).get('Disks') or []
+            if isinstance(disks,dict):disks=[disks]
+            if len(disks)!=1:raise ValueError('Select a mounted trigger volume on exactly one physical disk, then refresh volumes.')
+            serial=str(disks[0].get('SerialNumber') or '').strip()
+            if not serial:raise ValueError('This disk does not report a serial number. Use its Volume-ID instead.')
+            vars['trigger_serial'].set(serial)
+            vars['trigger_interface'].set(str(disks[0].get('InterfaceType') or '').strip())
+            log('Selected disk: '+str(disks[0].get('Model') or '')+'; serial '+serial)
+        except Exception as exc:error(exc)
+    def store(start_automatic=True):
         if selected is None:raise ValueError('Add or select a job first.')
         job=dict(config['jobs'][selected])
         for key,var in vars.items():
@@ -135,11 +161,13 @@ def main():
         for key in ('source','destination'):
             job[key]=volume_folder(job[key]) if job.get(key+'_volume') else clean_folder(job[key])
             vars[key].set(job[key])
+        if (job.get('trigger_serial') or job.get('trigger_interface')) and not job.get('trigger_volume'):raise ValueError('Choose a trigger Volume-ID when setting physical disk filters.')
         job['preferred_letter']=job.get('preferred_letter','').upper().rstrip(':')
         if job['preferred_letter'] and (job['preferred_letter'] not in 'DEFGHIJKLMNOPQRSTUVWXYZ' or len(job['preferred_letter'])!=1 or not job['trigger_volume']):raise ValueError('Preferred letter needs a trigger volume ID and one letter D–Z.')
         if job['engine']=='xcopy':xcopy_flags(job)
         config['jobs'][selected]=job;save(config);names();jobs.selection_set(selected)
         status.set('Saved. Background monitor reloads these settings automatically.')
+        if job['enabled'] and start_automatic:start_monitor()
         return job
     def preview():
         draft=dict(config['jobs'][selected]) if selected is not None else {}
@@ -165,7 +193,7 @@ def main():
     def run():
         nonlocal busy
         if busy:return
-        try:job=store()
+        try:job=store(False)
         except Exception as exc:error(exc);return
         busy=True;cancelled.clear();status.set('Copying…')
         def worker():
@@ -176,6 +204,8 @@ def main():
             finally:events.put(('done',None))
         threading.Thread(target=worker,daemon=False).start()
     def startup(remove=False):
+        if remove:(BASE/'stop-background').touch()
+        else:(BASE/'stop-background').unlink(missing_ok=True)
         if not getattr(sys,'frozen',False):error('Use the packaged Windows EXE for startup registration.');return
         def worker():
             try:win.register_task(sys.executable,config,remove);log('Startup removed.' if remove else 'Startup enabled; monitor started.')
@@ -208,9 +238,10 @@ def main():
                 volume=normalize_volume(job['trigger_volume'])
                 if not volume or len(letter)!=1 or letter not in 'DEFGHIJKLMNOPQRSTUVWXYZ':raise ValueError('Invalid preferred letter mapping.')
                 if letter in letters and letters[letter]!=volume:raise ValueError('Two volumes request the same letter.')
-                if volume in assignments and assignments[volume]!=letter:raise ValueError('One volume requests two letters.')
-                assignments[volume]=letter;letters[letter]=volume
-            data=[dict(volume=id,letter=letter+':') for id,letter in assignments.items()]
+                binding=dict(volume=volume,letter=letter+':',serial=job.get('trigger_serial','').strip(),interface=job.get('trigger_interface','').strip())
+                if volume in assignments and assignments[volume]!=binding:raise ValueError('One volume has conflicting letter or hardware mappings.')
+                assignments[volume]=binding;letters[letter]=volume
+            data=list(assignments.values())
             encoded=base64.b64encode(json.dumps(data).encode('utf-8')).decode()
             script=template.replace('__TASK_NAME__',win.task_name(config)).replace('__ASSIGNMENTS_JSON_B64__',encoded)
             Path(path).write_text(script,encoding='utf-8-sig')
@@ -235,11 +266,11 @@ def main():
             (target/'instance.json').write_text(json.dumps(identity,indent=2),encoding='utf-8')
             messagebox.showinfo('Installed',f'Run {target / "CopyJob.exe"}. This instance has separate jobs, UUID and startup settings.')
         except Exception as exc:error(exc)
-    for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Use selected disk ID',selected_disk),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
     for text,command in [('Save job',safe_store),('Preview paths',preview),('Copy now',run),('Cancel manual copy',cancelled.set),('Show installed XCOPY options',help_flags)]:ttk.Button(actions,text=text,command=command).pack(side='left',padx=2)
-    for text,command in [('Enable login startup',startup),('Remove login startup',lambda:startup(True)),('Pause / resume background',pause),('Export WMI setup…',export_wmi)]:ttk.Button(backgroundbar,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Start monitoring',start_monitor),('Stop monitoring',stop_monitor),('Enable login startup',startup),('Remove login startup',lambda:startup(True)),('Pause / resume background',pause),('Export WMI setup…',export_wmi)]:ttk.Button(backgroundbar,text=text,command=command).pack(side='left',padx=2)
     def tick():
-        nonlocal volumes,options,busy
+        nonlocal volumes,options,busy,log_offset
         while True:
             try:kind,data=events.get_nowait()
             except queue.Empty:break
@@ -252,10 +283,20 @@ def main():
             elif kind=='done':busy=False;status.set('Idle — see log for result.')
             elif kind=='log':
                 line=datetime.now().isoformat(timespec='seconds')+' '+data+'\n'
-                output.configure(state='normal');output.insert('end',line);output.see('end');output.configure(state='disabled')
                 try:
                     with (BASE/'copyjob.log').open('a',encoding='utf-8') as handle:handle.write(line)
                 except OSError:status.set('Cannot write log beside EXE.')
+        try:
+            path=BASE/'copyjob.log'
+            if path.exists():
+                if path.stat().st_size<log_offset:log_offset=0
+                with path.open('rb') as handle:
+                    handle.seek(log_offset)
+                    data=handle.read()
+                    log_offset=handle.tell()
+                if data:
+                    output.configure(state='normal');output.insert('end',data.decode('utf-8',errors='replace'));output.see('end');output.configure(state='disabled')
+        except OSError:pass
         if closing and not busy:root.destroy();return
         root.after(200,tick)
     def close():

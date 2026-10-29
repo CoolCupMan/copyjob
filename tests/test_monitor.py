@@ -33,9 +33,38 @@ class MonitorTests(unittest.TestCase):
                     elif self.step==6:volumes[normalize_volume(ID)]['DriveLetter']='Z:'
             stop=Stop()
             def run(*_):calls.append((stop.step,volumes[normalize_volume(ID)]['DriveLetter']));return True
-            with patch('windows_runtime.inventory',lambda:volumes),patch('windows_runtime.run_job',run):
+            with patch('windows_runtime.inventory',lambda:volumes),patch('windows_runtime.run_job',run),patch('drive_events.DriveEvents.start'):
                 watch(base,stop,lambda _:None)
             self.assertEqual(calls,[(0,'E:'),(5,'E:'),(6,'Z:')])
+
+    def test_fast_reconnect_with_same_letter_between_inventory_scans(self):
+        from drive_events import DriveEvents
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary)
+            job=new_job();job.update(enabled=True,delay=0,trigger_volume=ID)
+            (base/'instance.json').write_text(json.dumps({'jobs':[job]}))
+            volumes={normalize_volume(ID):dict(DriveLetter='E:')}
+            class FakeEvents(DriveEvents):
+                def start(self):pass
+                def close(self):pass
+            events=FakeEvents(lambda _:None)
+            calls=[]
+            class Stop:
+                step=0
+                def is_set(self):return self.step>=4
+                def wait(self,_):
+                    self.step+=1
+                    if self.step==1:
+                        events.record('E:',3);events.record('E:',2)
+                    elif self.step==2:
+                        events.record('F:',2)
+                    elif self.step==3:
+                        events.record('E:',1)
+            stop=Stop()
+            def run(*_):calls.append(stop.step);return True
+            with patch('windows_runtime.inventory',lambda:volumes),patch('windows_runtime.run_job',run),patch('drive_events.DriveEvents.start'):
+                watch(base,stop,lambda _:None,event_source=events)
+            self.assertEqual(calls,[0,1])
 
     def test_fixed_destination_folder_does_not_change_drive_trigger(self):
         job=new_job();job['destination']='E:\\Backup'
