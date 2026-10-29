@@ -13,5 +13,5 @@ jobs:
       - run: python -m PyInstaller --clean --noconfirm --onefile --windowed --name CopyJob --version-file version_info.txt --add-data "wmi_setup.ps1;." app.py
       - uses: actions/upload-artifact@v4
         with:
-          name: CopyJob-1.1.0-windows-x64
+          name: CopyJob-1.1.1-windows-x64
           path: dist/CopyJob.exe

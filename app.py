@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 from datetime import datetime
 from core import APP_ID,VERSION,new_config
-from automation import FLAGS,new_job,normalize_volume,xcopy_flags
+from automation import FLAGS,new_job,normalize_volume,xcopy_flags,volume_folder,clean_folder
 import windows_runtime as win
 
 BASE=Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).parent
@@ -73,8 +73,13 @@ def main():
             widget=ttk.Combobox(controls,textvariable=vars[key],width=95,values=list(options));volume_boxes.append(widget)
         else:widget=ttk.Entry(controls,textvariable=vars[key],width=95)
         widget.grid(row=row,column=1,sticky='ew')
+        if key in ('source','destination'):
+            def browse_folder(k=key):
+                chosen=filedialog.askdirectory()
+                if chosen:vars[k].set(chosen)
+            ttk.Button(controls,text='Browse…',command=browse_folder).grid(row=row,column=2,padx=3)
     controls.columnconfigure(1,weight=1)
-    ttk.Label(frame,text='With a volume selected, enter a relative folder (e.g. Backups\\Documents); otherwise use a full path.').pack(anchor='w')
+    ttk.Label(frame,text='Selected volume controls the drive: E:\\Backup becomes Backup and follows that volume. Without a volume ID, the full path stays fixed.').pack(anchor='w')
     settings=ttk.Frame(frame);settings.pack(fill='x',pady=5)
     ttk.Checkbutton(settings,text='Enable automatic job',variable=enabled).pack(side='left')
     ttk.Combobox(settings,textvariable=vars['engine'],values=['xcopy','builtin','powershell'],state='readonly',width=9).pack(side='left',padx=6)
@@ -127,12 +132,28 @@ def main():
             if not 0<=job[key]<=86400:raise ValueError('Timing must be between 0 and 86400 seconds.')
         job.update(enabled=enabled.get(),flags=[f for f,v in flagvars.items() if v.get()])
         if not job['source'] or not job['destination']:raise ValueError('Enter source and destination folders.')
+        for key in ('source','destination'):
+            job[key]=volume_folder(job[key]) if job.get(key+'_volume') else clean_folder(job[key])
+            vars[key].set(job[key])
         job['preferred_letter']=job.get('preferred_letter','').upper().rstrip(':')
         if job['preferred_letter'] and (job['preferred_letter'] not in 'DEFGHIJKLMNOPQRSTUVWXYZ' or len(job['preferred_letter'])!=1 or not job['trigger_volume']):raise ValueError('Preferred letter needs a trigger volume ID and one letter D–Z.')
         if job['engine']=='xcopy':xcopy_flags(job)
         config['jobs'][selected]=job;save(config);names();jobs.selection_set(selected)
         status.set('Saved. Background monitor reloads these settings automatically.')
         return job
+    def preview():
+        draft=dict(config['jobs'][selected]) if selected is not None else {}
+        for key in ('trigger_volume','source_volume','destination_volume','source','destination'):
+            value=vars[key].get().strip()
+            draft[key]=options.get(value,value) if key.endswith('volume') else value
+        def worker():
+            try:
+                source,destination=win.prepare_job(draft,win.inventory())
+                log('Preview source: '+source)
+                log('Preview destination: '+destination)
+                log('Source folder exists: '+str(Path(source).is_dir()))
+            except Exception as exc:log('Preview: '+str(exc))
+        threading.Thread(target=worker,daemon=True).start()
     def safe_store():
         try:store()
         except Exception as exc:error(exc)
@@ -215,7 +236,7 @@ def main():
             messagebox.showinfo('Installed',f'Run {target / "CopyJob.exe"}. This instance has separate jobs, UUID and startup settings.')
         except Exception as exc:error(exc)
     for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
-    for text,command in [('Save job',safe_store),('Copy now',run),('Cancel manual copy',cancelled.set),('Show installed XCOPY options',help_flags)]:ttk.Button(actions,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Save job',safe_store),('Preview paths',preview),('Copy now',run),('Cancel manual copy',cancelled.set),('Show installed XCOPY options',help_flags)]:ttk.Button(actions,text=text,command=command).pack(side='left',padx=2)
     for text,command in [('Enable login startup',startup),('Remove login startup',lambda:startup(True)),('Pause / resume background',pause),('Export WMI setup…',export_wmi)]:ttk.Button(backgroundbar,text=text,command=command).pack(side='left',padx=2)
     def tick():
         nonlocal volumes,options,busy

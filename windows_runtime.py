@@ -59,6 +59,8 @@ def register_task(exe,config,remove=False):
 
 def _run_job(job,volumes,log,cancelled):
     source,destination=prepare_job(job,volumes)
+    log(job['name']+': source = '+source)
+    log(job['name']+': destination = '+destination)
     validate(source,destination)
     if job.get('engine','xcopy')=='builtin':
         count=copy_job(source,destination,log,cancelled)

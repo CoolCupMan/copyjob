@@ -3,7 +3,7 @@ from pathlib import Path
 import shutil
 import uuid
 
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 APP_ID = 'org.copyjob.desktop'
 
 
@@ -22,7 +22,7 @@ def validate(source, destination):
                 raise ValueError('Selected paths must not contain links or junctions.')
     src, dst = Path(source).resolve(), Path(destination).resolve()
     if not src.is_dir():
-        raise ValueError('Source folder is unavailable.')
+        raise ValueError('Source folder is unavailable: '+str(src))
     if src == dst or src in dst.parents or dst in src.parents:
         raise ValueError('Source and destination must be separate, non-nested folders.')
     return src, dst

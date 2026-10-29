@@ -7,7 +7,7 @@ import tkinter as tk
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import app
 from core import new_config
-from automation import new_job
+from automation import new_job,normalize_volume
 
 with tempfile.TemporaryDirectory() as temporary:
     base=Path(temporary)
@@ -16,11 +16,13 @@ with tempfile.TemporaryDirectory() as temporary:
     destination=base/'destination'
     config=new_config();job=new_job()
     job.update(source=str(source),destination=str(destination),name='GUI integration')
+    volume_id=r'\\?\Volume{58081618-0000-0000-0000-100000000000}'+chr(92)
+    job.update(source_volume=volume_id,destination_volume=volume_id)
     config['jobs']=[job]
     (base/'instance.json').write_text(json.dumps(config),encoding='utf-8')
     app.BASE=base
     # Wine does not implement Windows' CIM inventory; only this inventory call is stubbed.
-    app.win.inventory=lambda:{}
+    app.win.inventory=lambda:{normalize_volume(volume_id):dict(DeviceID=volume_id,DriveLetter=source.drive,Label='Test')}
     original=tk.Tk
     state={'done':False}
     def factory(*args,**kwargs):
@@ -40,4 +42,4 @@ with tempfile.TemporaryDirectory() as temporary:
     tk.Tk=factory
     app.main()
     assert state['done'],'GUI did not produce expected copy'
-    print('PASS: GUI Copy now -> native XCOPY -> expected file contents')
+    print('PASS: full paths + selected volume -> GUI save normalization -> native XCOPY -> expected file contents')

@@ -20,18 +20,39 @@ def normalize_volume(value):
         raise ValueError('Expected a volume GUID, e.g. \\\\?\\Volume{...}\\')
     return value.casefold()
 
+def clean_folder(value):
+    value=value.strip()
+    if len(value)>=2 and value[0]==value[-1] and value[0] in ('"', "'"):
+        value=value[1:-1].strip()
+    if not value:raise ValueError('Enter a folder path; use . for the selected volume root.')
+    return value.replace('/','\\')
+
+def volume_folder(value):
+    """A selected volume identifies the disk; retain only a pasted drive path's folder."""
+    value=clean_folder(value)
+    drive,tail=ntpath.splitdrive(value)
+    if drive:
+        if not re.fullmatch(r'[A-Za-z]:',drive) or not tail.startswith('\\'):
+            raise ValueError('With a volume selected, use a relative folder or a full drive path such as E:\\Backup; UNC/device paths are not supported here.')
+        value=tail.lstrip('\\') or '.'
+    elif value.startswith('\\'):
+        value=value.lstrip('\\') or '.'
+    if '..' in [part.rstrip(' ') for part in value.split('\\')] or ':' in value:
+        raise ValueError('A volume folder cannot contain .. or a drive-relative path.')
+    return ntpath.normpath(value)
+
 def resolve_path(path, volume_id, volumes):
     if not volume_id:
-        if not ntpath.isabs(path):
-            raise ValueError('Choose an absolute path or a volume plus relative folder.')
+        path=clean_folder(path)
+        drive,tail=ntpath.splitdrive(path)
+        if not drive or not ntpath.isabs(path):
+            raise ValueError('Without a volume ID, use a full path such as C:\\Users\\Name\\Documents.')
         return path
     volume=volumes.get(normalize_volume(volume_id))
     if not volume or not volume.get('DriveLetter'):
-        raise FileNotFoundError('Waiting for the selected volume to receive a drive letter.')
-    relative=path.replace('/','\\')
-    if ntpath.isabs(relative) or ntpath.splitdrive(relative)[0] or '..' in relative.split('\\'):
-        raise ValueError('A volume folder must be relative and cannot contain ..')
-    return ntpath.join(volume['DriveLetter']+'\\',relative)
+        raise FileNotFoundError('Waiting for the selected volume to receive a drive letter: '+volume_id)
+    relative=volume_folder(path)
+    return ntpath.normpath(ntpath.join(volume['DriveLetter']+'\\',relative))
 
 def xcopy_flags(job):
     tokens=['/'+f.upper().lstrip('/') for f in job.get('flags',[])]

@@ -14,6 +14,34 @@ class AutomationTests(unittest.TestCase):
         self.volumes[normalize_volume(ID)]['DriveLetter']='Z:'
         self.assertEqual(prepare_job(self.job,self.volumes)[1],r'Z:\Backup')
 
+    def test_full_drive_path_tracks_selected_volume_after_letter_change(self):
+        self.job['destination']=r'E:\Backups\Documents'
+        self.assertEqual(prepare_job(self.job,self.volumes)[1],r'E:\Backups\Documents')
+        self.volumes[normalize_volume(ID)]['DriveLetter']='Z:'
+        self.assertEqual(prepare_job(self.job,self.volumes)[1],r'Z:\Backups\Documents')
+
+    def test_explorer_quotes_spaces_and_volume_root(self):
+        for value,expected in [('"E:\\My Backup"',r'E:\My Backup'),('E:\\','E:\\'),('\\Backup',r'E:\Backup')]:
+            self.job['destination']=value
+            self.assertEqual(prepare_job(self.job,self.volumes)[1],expected)
+
+    def test_leading_backslashes_in_source_and_destination(self):
+        source_id=r'\\?\Volume{456e291b-0ff5-46a9-a4e1-e9c1f0adac5f}'+chr(92)
+        self.volumes[normalize_volume(source_id)]=dict(DeviceID=source_id,DriveLetter='C:')
+        self.volumes[normalize_volume(ID)]['DriveLetter']='Z:'
+        self.job.update(source_volume=source_id,source=r'\Users\Chris Narup\Documents\ChatGPT',destination=r'\CopyJobProgramTest')
+        self.assertEqual(prepare_job(self.job,self.volumes),(r'C:\Users\Chris Narup\Documents\ChatGPT',r'Z:\CopyJobProgramTest'))
+
+    def test_invalid_volume_folder_forms(self):
+        for value in [r'E:Backup',r'\\server\share\Backup',r'E:\..\outside',r'Folder\.. \outside',r'Folder:stream']:
+            self.job['destination']=value
+            with self.assertRaises(ValueError):prepare_job(self.job,self.volumes)
+
+    def test_fixed_path_is_not_remapped(self):
+        self.job.update(destination=r'E:\Backup',destination_volume='')
+        self.volumes[normalize_volume(ID)]['DriveLetter']='Z:'
+        self.assertEqual(prepare_job(self.job,self.volumes)[1],r'E:\Backup')
+
     def test_waits_for_letter_and_missing_volume(self):
         for volumes in [{},{normalize_volume(ID):dict(DriveLetter=None)}]:
             with self.assertRaises(FileNotFoundError):prepare_job(self.job,volumes)

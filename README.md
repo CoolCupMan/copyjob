@@ -1,4 +1,4 @@
-# CopyJob 1.1.0 — volume-aware Windows backup jobs
+# CopyJob 1.1.1 — volume-aware Windows backup jobs
 
 Application ID: `org.copyjob.desktop`. Each installation has an independent UUID,
 configuration, log and scheduled task. Intended platform: Windows 10/11 with Windows
@@ -15,7 +15,13 @@ PowerShell 5.1, WMI/CIM and Task Scheduler. The application is unsigned.
 3. Add one job per copy operation. Choose a **trigger volume** to run when that volume
    has a drive letter. Choose optional **source volume** and **destination volume** IDs
    so paths follow those volumes when their letters change. In volume-relative fields,
-   enter `Documents`, `Backups\Documents`, or `.` for the root. Otherwise use a full path.
+   enter `Documents`, `Backups\Documents`, or `.` for the root. Full drive paths
+   such as `E:\Backups\Documents` are accepted too: saving converts them to
+   `Backups\Documents` relative to the selected volume. The selected Volume-ID
+   controls the drive, even if its current letter differs from the pasted path.
+   With no volume selected, full paths stay fixed. Use **Preview paths** to check
+   the resolved source, destination and source availability without copying or
+   enabling an automatic job.
 4. Choose engine, switches, delay and retry interval. Enable **automatic job**, then
    **Save job**. **Copy now** runs the selected saved settings immediately.
 5. Select **Enable login startup**. This registers and starts a limited, interactive
