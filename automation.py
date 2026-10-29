@@ -1,0 +1,90 @@
+"""Volume-aware job configuration and reconnect scheduling (testable without Windows)."""
+import ntpath
+import re
+import time
+import uuid
+
+VOLUME = re.compile(r'^\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\$')
+# Native XCOPY remains responsible for OS-specific combinations and filesystem capabilities.
+FLAGS = ['A','M','D','S','E','V','W','C','I','Q','F','L','G','H','R','T','U','K','N','O','X','Y','-Y','Z','B','J','COMPRESS','SPARSE','NOCLONE']
+
+def new_job():
+    return dict(id=str(uuid.uuid4()), name='New copy job', enabled=False,
+                trigger_volume='', source_volume='', destination_volume='', source='',
+                destination='', engine='xcopy', flags=['E','I','H','K','Y'],
+                extra_flags='', script_path='', preferred_letter='', delay=3, retry_seconds=60)
+
+def normalize_volume(value):
+    value=value.strip()
+    if value and not VOLUME.fullmatch(value):
+        raise ValueError('Expected a volume GUID, e.g. \\\\?\\Volume{...}\\')
+    return value.casefold()
+
+def resolve_path(path, volume_id, volumes):
+    if not volume_id:
+        if not ntpath.isabs(path):
+            raise ValueError('Choose an absolute path or a volume plus relative folder.')
+        return path
+    volume=volumes.get(normalize_volume(volume_id))
+    if not volume or not volume.get('DriveLetter'):
+        raise FileNotFoundError('Waiting for the selected volume to receive a drive letter.')
+    relative=path.replace('/','\\')
+    if ntpath.isabs(relative) or ntpath.splitdrive(relative)[0] or '..' in relative.split('\\'):
+        raise ValueError('A volume folder must be relative and cannot contain ..')
+    return ntpath.join(volume['DriveLetter']+'\\',relative)
+
+def xcopy_flags(job):
+    tokens=['/'+f.upper().lstrip('/') for f in job.get('flags',[])]
+    text=job.get('extra_flags','').strip()
+    pattern=re.compile(r'/[-A-Za-z]+(?::(?:"[^"\r\n]*"|[^\s"]+))?')
+    position=0
+    for match in pattern.finditer(text):
+        if text[position:match.start()].strip():raise ValueError('Invalid XCOPY switches.')
+        tokens.append(match.group().replace('"',''))
+        position=match.end()
+    if text[position:].strip():raise ValueError('Invalid XCOPY switches.')
+    allowed=set(FLAGS)
+    for token in tokens:
+        if not re.fullmatch(r'/[-A-Za-z]+(?::[^\r\n"]+)?', token):
+            raise ValueError('XCOPY options must be individual switches, not commands or paths.')
+        flag=token[1:].split(':',1)[0].upper()
+        if flag not in allowed and flag not in {'EXCLUDE'}:
+            raise ValueError('Unknown XCOPY option: '+token)
+    # Background jobs must never wait indefinitely for interactive prompts.
+    if any(t.upper() in {'/W','/-Y'} for t in tokens):
+        raise ValueError('/W and /-Y require interaction; use manual console XCOPY for these modes.')
+    if not any(t.upper()=='/Y' for t in tokens):tokens.append('/Y')
+    if not any(t.upper()=='/I' for t in tokens):tokens.append('/I')
+    return tokens
+
+def prepare_job(job,volumes):
+    trigger=normalize_volume(job.get('trigger_volume',''))
+    if trigger and (trigger not in volumes or not volumes[trigger].get('DriveLetter')):
+        raise FileNotFoundError('Waiting for trigger volume / drive letter.')
+    source=resolve_path(job['source'],job.get('source_volume',''),volumes)
+    destination=resolve_path(job['destination'],job.get('destination_volume',''),volumes)
+    a,b=ntpath.normcase(ntpath.normpath(source)),ntpath.normcase(ntpath.normpath(destination))
+    try: common=ntpath.commonpath([a,b])
+    except ValueError:common=None
+    if common in (a,b):raise ValueError('Source and destination must be separate non-nested folders.')
+    return source,destination
+
+class Scheduler:
+    """One run per availability/mapping transition; failures retry, successes stay idle."""
+    def __init__(self):self.states={}
+    def due(self,job,signature,now=None):
+        now=time.monotonic() if now is None else now
+        key=job['id']
+        if not signature:
+            self.states.pop(key,None)
+            return False
+        state=self.states.get(key)
+        if state is None or state['signature']!=signature:
+            state=dict(signature=signature,deadline=now+max(0,float(job.get('delay',3))),done=False)
+            self.states[key]=state
+        return not state['done'] and now>=state['deadline']
+    def finish(self,job,success,now=None):
+        state=self.states.get(job['id'])
+        if state:
+            state['done']=success
+            state['deadline']=(time.monotonic() if now is None else now)+max(5,float(job.get('retry_seconds',60)))

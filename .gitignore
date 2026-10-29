@@ -1,0 +1,7 @@
+__pycache__/
+build/
+dist/
+*.spec
+instance.json
+instance.tmp
+copyjob.log

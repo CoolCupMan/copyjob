@@ -1,0 +1,257 @@
+"""CopyJob desktop settings and explicit per-user background monitor."""
+import json
+import os
+from pathlib import Path
+import queue
+import shutil
+import sys
+import threading
+import tkinter as tk
+from tkinter import filedialog,messagebox,ttk
+from datetime import datetime
+from core import APP_ID,VERSION,new_config
+from automation import FLAGS,new_job,normalize_volume,xcopy_flags
+import windows_runtime as win
+
+BASE=Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).parent
+
+def load():
+    path=BASE/'instance.json'
+    config=json.loads(path.read_text(encoding='utf-8')) if path.exists() else new_config()
+    if 'jobs' not in config:
+        config['jobs']=[]
+        if config.get('source') and config.get('destination'):
+            job=new_job();job.update(source=config['source'],destination=config['destination'],name='Imported 1.0 job',engine='builtin')
+            config['jobs'].append(job)
+    import uuid
+    uuid.UUID(config['instance_id'])
+    config.update(version=VERSION,schema=2)
+    return config
+
+def save(config):
+    path=BASE/'instance.tmp'
+    path.write_text(json.dumps(config,indent=2),encoding='utf-8')
+    path.replace(BASE/'instance.json')
+
+def background():
+    config=load()
+    import ctypes
+    from ctypes import wintypes
+    kernel=ctypes.windll.kernel32
+    kernel.CreateMutexW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype=wintypes.HANDLE
+    handle=kernel.CreateMutexW(None,False,'Global\\CopyJob-monitor-'+config['instance_id'])
+    if not handle:raise ctypes.WinError()
+    if kernel.GetLastError()==183:
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle(handle);return
+    def log(message):
+        with (BASE/'copyjob.log').open('a',encoding='utf-8') as output:
+            output.write(datetime.now().isoformat(timespec='seconds')+' '+message+'\n')
+    log('Background monitor started; configuration reloads every 3 seconds.')
+    try:win.watch(BASE,threading.Event(),log)
+    finally:
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle(handle)
+
+def main():
+    config=load();save(config)
+    root=tk.Tk();root.title(f'CopyJob {VERSION} — {config["instance_id"][:8]}');root.geometry('1100x860')
+    events=queue.Queue();cancelled=threading.Event();busy=False;closing=False
+    volumes={};options={'Fixed path / no volume ID':''};selected=None
+    frame=ttk.Frame(root,padding=12);frame.pack(fill='both',expand=True)
+    ttk.Label(frame,text=f'CopyJob {VERSION} | Instance {config["instance_id"]}').pack(anchor='w')
+    ttk.Label(frame,text='Background setup is explicit. Jobs run after sign-in and reconnect, including drive-letter changes.').pack(anchor='w')
+    bar=ttk.Frame(frame);bar.pack(fill='x',pady=4)
+    jobs=tk.Listbox(frame,height=4,exportselection=False);jobs.pack(fill='x')
+    vars={key:tk.StringVar() for key in ['name','source','destination','trigger_volume','source_volume','destination_volume','engine','delay','retry_seconds','extra_flags','script_path','preferred_letter']}
+    enabled=tk.BooleanVar();flagvars={flag:tk.BooleanVar() for flag in FLAGS}
+    vars['engine'].set('xcopy');vars['delay'].set('3');vars['retry_seconds'].set('60')
+    controls=ttk.Frame(frame);controls.pack(fill='x')
+    volume_boxes=[]
+    for row,(label,key) in enumerate([('Job name','name'),('Trigger volume','trigger_volume'),('Source volume','source_volume'),('Source folder','source'),('Destination volume','destination_volume'),('Destination folder','destination'),('Optional PS1 script','script_path'),('Preferred trigger letter','preferred_letter')]):
+        ttk.Label(controls,text=label,width=20).grid(row=row,column=0,sticky='w',pady=2)
+        if key.endswith('volume'):
+            widget=ttk.Combobox(controls,textvariable=vars[key],width=95,values=list(options));volume_boxes.append(widget)
+        else:widget=ttk.Entry(controls,textvariable=vars[key],width=95)
+        widget.grid(row=row,column=1,sticky='ew')
+    controls.columnconfigure(1,weight=1)
+    ttk.Label(frame,text='With a volume selected, enter a relative folder (e.g. Backups\\Documents); otherwise use a full path.').pack(anchor='w')
+    settings=ttk.Frame(frame);settings.pack(fill='x',pady=5)
+    ttk.Checkbutton(settings,text='Enable automatic job',variable=enabled).pack(side='left')
+    ttk.Combobox(settings,textvariable=vars['engine'],values=['xcopy','builtin','powershell'],state='readonly',width=9).pack(side='left',padx=6)
+    for label,key in [('Delay seconds','delay'),('Retry seconds','retry_seconds')]:
+        ttk.Label(settings,text=label).pack(side='left');ttk.Entry(settings,textvariable=vars[key],width=6).pack(side='left',padx=4)
+    flags=ttk.LabelFrame(frame,text='XCOPY switches (native Windows version; /W and /-Y are interactive-only)');flags.pack(fill='x')
+    for i,flag in enumerate(FLAGS):ttk.Checkbutton(flags,text='/'+flag,variable=flagvars[flag]).grid(row=i//16,column=i%16,sticky='w')
+    row=ttk.Frame(frame);row.pack(fill='x',pady=3)
+    ttk.Label(row,text='Additional switches, e.g. /D:10-29-2026 /EXCLUDE:C:\\exclude.txt').pack(side='left')
+    ttk.Entry(row,textvariable=vars['extra_flags']).pack(side='left',fill='x',expand=True)
+    ttk.Label(frame,text='XCOPY may overwrite older or newer files depending on flags. /L previews. No deletion/mirroring is performed.').pack(anchor='w')
+    actions=ttk.Frame(frame);actions.pack(fill='x',pady=4)
+    backgroundbar=ttk.Frame(frame);backgroundbar.pack(fill='x',pady=4)
+    status=tk.StringVar(value='Ready. Save settings before enabling background startup.')
+    ttk.Label(frame,textvariable=status,wraplength=1050).pack(anchor='w')
+    output=tk.Text(frame,height=10,state='disabled');output.pack(fill='both',expand=True)
+
+    def log(text):events.put(('log',text))
+    def error(exc):messagebox.showerror('CopyJob',str(exc))
+    def names():
+        jobs.delete(0,'end')
+        for job in config['jobs']:jobs.insert('end',('✓ ' if job['enabled'] else '○ ')+job['name'])
+    def show_job(index):
+        nonlocal selected
+        if index is None:return
+        selected=index;job=config['jobs'][index]
+        for key,var in vars.items():
+            value=job.get(key,'')
+            if key.endswith('volume'):
+                value=next((text for text,id in options.items() if id.casefold()==value.casefold()),value)
+            var.set(str(value))
+        enabled.set(job['enabled'])
+        for flag,var in flagvars.items():var.set(flag in job.get('flags',[]))
+    jobs.bind('<<ListboxSelect>>',lambda _:show_job(jobs.curselection()[0]) if jobs.curselection() else None)
+    def add():
+        config['jobs'].append(new_job());names();jobs.selection_set(len(config['jobs'])-1);show_job(len(config['jobs'])-1)
+    def remove():
+        nonlocal selected
+        if selected is not None and messagebox.askyesno('Delete job','Remove this job configuration?'):
+            config['jobs'].pop(selected);selected=None;save(config);names()
+    def store():
+        if selected is None:raise ValueError('Add or select a job first.')
+        job=dict(config['jobs'][selected])
+        for key,var in vars.items():
+            value=var.get().strip()
+            if key.endswith('volume'):value=options.get(value,value);normalize_volume(value)
+            job[key]=value
+        for key in ['delay','retry_seconds']:
+            job[key]=float(job[key])
+            if not 0<=job[key]<=86400:raise ValueError('Timing must be between 0 and 86400 seconds.')
+        job.update(enabled=enabled.get(),flags=[f for f,v in flagvars.items() if v.get()])
+        if not job['source'] or not job['destination']:raise ValueError('Enter source and destination folders.')
+        job['preferred_letter']=job.get('preferred_letter','').upper().rstrip(':')
+        if job['preferred_letter'] and (job['preferred_letter'] not in 'DEFGHIJKLMNOPQRSTUVWXYZ' or len(job['preferred_letter'])!=1 or not job['trigger_volume']):raise ValueError('Preferred letter needs a trigger volume ID and one letter D–Z.')
+        if job['engine']=='xcopy':xcopy_flags(job)
+        config['jobs'][selected]=job;save(config);names();jobs.selection_set(selected)
+        status.set('Saved. Background monitor reloads these settings automatically.')
+        return job
+    def safe_store():
+        try:store()
+        except Exception as exc:error(exc)
+    def refresh():
+        def worker():
+            try:events.put(('volumes',win.inventory()))
+            except Exception as exc:log('Volume inventory failed: '+str(exc))
+        threading.Thread(target=worker,daemon=True).start()
+    def run():
+        nonlocal busy
+        if busy:return
+        try:job=store()
+        except Exception as exc:error(exc);return
+        busy=True;cancelled.clear();status.set('Copying…')
+        def worker():
+            try:
+                ok=win.run_job(job,win.inventory(),log,cancelled)
+                log('Job complete.' if ok else 'Job failed; see native XCOPY output above.')
+            except Exception as exc:log('Copy failed: '+str(exc))
+            finally:events.put(('done',None))
+        threading.Thread(target=worker,daemon=False).start()
+    def startup(remove=False):
+        if not getattr(sys,'frozen',False):error('Use the packaged Windows EXE for startup registration.');return
+        def worker():
+            try:win.register_task(sys.executable,config,remove);log('Startup removed.' if remove else 'Startup enabled; monitor started.')
+            except Exception as exc:log('Task setup failed: '+str(exc))
+        threading.Thread(target=worker,daemon=True).start()
+    def pause():
+        path=BASE/'pause-background'
+        if path.exists():path.unlink();status.set('Automatic jobs resumed.')
+        else:path.touch();status.set('Automatic jobs paused; a current copy finishes. Manual copy remains available.')
+    def assign():
+        value=options.get(vars['trigger_volume'].get(),vars['trigger_volume'].get())
+        from tkinter.simpledialog import askstring
+        letter=askstring('Assign drive letter','Preferred letter D–Z for the selected trigger volume. Requires UAC approval; occupied letters are preserved.')
+        if not letter:return
+        def worker():
+            try:win.assign_letter(value,letter);log('Drive letter assigned.');refresh()
+            except Exception as exc:log('Assignment failed: '+str(exc))
+        threading.Thread(target=worker,daemon=True).start()
+    def export_wmi():
+        path=filedialog.asksaveasfilename(defaultextension='.ps1',initialfile='CopyJob-WMI-Setup.ps1')
+        if not path:return
+        template=(Path(getattr(sys,'_MEIPASS',BASE))/'wmi_setup.ps1').read_text(encoding='utf-8')
+        import base64
+        assignments={}
+        letters={}
+        try:
+            for job in config['jobs']:
+                letter=job.get('preferred_letter','')
+                if not letter:continue
+                volume=normalize_volume(job['trigger_volume'])
+                if not volume or len(letter)!=1 or letter not in 'DEFGHIJKLMNOPQRSTUVWXYZ':raise ValueError('Invalid preferred letter mapping.')
+                if letter in letters and letters[letter]!=volume:raise ValueError('Two volumes request the same letter.')
+                if volume in assignments and assignments[volume]!=letter:raise ValueError('One volume requests two letters.')
+                assignments[volume]=letter;letters[letter]=volume
+            data=[dict(volume=id,letter=letter+':') for id,letter in assignments.items()]
+            encoded=base64.b64encode(json.dumps(data).encode('utf-8')).decode()
+            script=template.replace('__TASK_NAME__',win.task_name(config)).replace('__ASSIGNMENTS_JSON_B64__',encoded)
+            Path(path).write_text(script,encoding='utf-8-sig')
+        except Exception as exc:error(exc);return
+        messagebox.showinfo('WMI setup exported','First enable login startup. Then run this script as administrator to add the optional permanent WMI consumer. Use -Remove to remove only this instance’s consumer. The consumer starts the configured user task after sign-in. Saved preferred letters optionally add a SYSTEM startup task that assigns only those volumes and never takes occupied letters.')
+    def help_flags():
+        def worker():
+            try:
+                import subprocess
+                result=subprocess.run(['xcopy.exe','/?'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,creationflags=win.NO_WINDOW,text=True,errors='replace',timeout=10)
+                log(result.stdout)
+            except Exception as exc:log(str(exc))
+        threading.Thread(target=worker,daemon=True).start()
+    def install():
+        if not getattr(sys,'frozen',False):error('Build the Windows EXE first.');return
+        parent=filedialog.askdirectory(title='Parent folder for independent installation')
+        if not parent:return
+        identity=new_config();identity.update(schema=2,jobs=[])
+        target=Path(parent)/f'CopyJob-{VERSION}-{identity["instance_id"]}'
+        try:
+            target.mkdir();shutil.copy2(sys.executable,target/'CopyJob.exe')
+            (target/'instance.json').write_text(json.dumps(identity,indent=2),encoding='utf-8')
+            messagebox.showinfo('Installed',f'Run {target / "CopyJob.exe"}. This instance has separate jobs, UUID and startup settings.')
+        except Exception as exc:error(exc)
+    for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Save job',safe_store),('Copy now',run),('Cancel manual copy',cancelled.set),('Show installed XCOPY options',help_flags)]:ttk.Button(actions,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Enable login startup',startup),('Remove login startup',lambda:startup(True)),('Pause / resume background',pause),('Export WMI setup…',export_wmi)]:ttk.Button(backgroundbar,text=text,command=command).pack(side='left',padx=2)
+    def tick():
+        nonlocal volumes,options,busy
+        while True:
+            try:kind,data=events.get_nowait()
+            except queue.Empty:break
+            if kind=='volumes':
+                volumes=data;options={'Fixed path / no volume ID':''}
+                for id,v in volumes.items():options[f'{v.get("DriveLetter") or "No letter"} | {v.get("Label") or "Unlabelled"} | {v["DeviceID"]}']=v['DeviceID']
+                for box in volume_boxes:box['values']=list(options)
+                if selected is not None:show_job(selected)
+                log(f'{len(volumes)} Windows volumes found (internal, USB and external).')
+            elif kind=='done':busy=False;status.set('Idle — see log for result.')
+            elif kind=='log':
+                line=datetime.now().isoformat(timespec='seconds')+' '+data+'\n'
+                output.configure(state='normal');output.insert('end',line);output.see('end');output.configure(state='disabled')
+                try:
+                    with (BASE/'copyjob.log').open('a',encoding='utf-8') as handle:handle.write(line)
+                except OSError:status.set('Cannot write log beside EXE.')
+        if closing and not busy:root.destroy();return
+        root.after(200,tick)
+    def close():
+        nonlocal closing
+        closing=True;cancelled.set();status.set('Closing settings; registered background automation continues.')
+    root.protocol('WM_DELETE_WINDOW',close)
+    names()
+    if config['jobs']:jobs.selection_set(0);show_job(0)
+    else:add()
+    refresh();root.after(100,tick);root.mainloop()
+
+if __name__=='__main__':
+    try:
+        if '--background' in sys.argv:background()
+        else:main()
+    except Exception as exc:
+        if '--background' in sys.argv:
+            with (BASE/'copyjob.log').open('a',encoding='utf-8') as output:output.write('Background failure: '+str(exc)+'\n')
+            raise SystemExit(1)
+        messagebox.showerror('CopyJob startup failed',str(exc))
