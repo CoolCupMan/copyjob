@@ -6,7 +6,7 @@ ID=r'\\?\Volume{58081618-0000-0000-0000-100000000000}'+'\\'
 class AutomationTests(unittest.TestCase):
     def setUp(self):
         self.job=new_job()
-        self.job.update(source=r'C:\Users\Example\Documents',destination='Backup',destination_volume=ID,trigger_volume=ID)
+        self.job.update(layout='contents',source=r'C:\Users\Example\Documents',destination='Backup',destination_volume=ID,trigger_volume=ID)
         self.volumes={normalize_volume(ID):dict(DeviceID=ID,DriveLetter='E:')}
 
     def test_letter_change_resolves_same_volume(self):

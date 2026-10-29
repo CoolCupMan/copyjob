@@ -10,7 +10,7 @@ FLAGS = ['A','M','D','S','E','V','W','C','I','Q','F','L','G','H','R','T','U','K'
 
 def new_job():
     return dict(id=str(uuid.uuid4()), name='New copy job', enabled=False,
-                trigger_volume='', trigger_serial='', trigger_interface='', source_volume='', destination_volume='', source='',
+                trigger_volume='', trigger_serial='', trigger_interface='', source_volume='', source_serial='', source_interface='', destination_volume='', destination_serial='', destination_interface='', layout='folder', source='',
                 destination='', engine='xcopy', flags=['E','I','H','K','Y'],
                 extra_flags='', script_path='', preferred_letter='', delay=3, retry_seconds=60)
 
@@ -86,15 +86,28 @@ def prepare_job(job,volumes):
         raise FileNotFoundError('Trigger volume is absent or disk serial/interface does not match.')
     source=resolve_path(job['source'],job.get('source_volume',''),volumes)
     destination=resolve_path(job['destination'],job.get('destination_volume',''),volumes)
+    for role in ('source','destination'):
+        if job.get(role+'_serial') or job.get(role+'_interface'):
+            identity=normalize_volume(job.get(role+'_volume',''))
+            if not identity:raise ValueError('Select a '+role+' Volume-ID when using hardware filters.')
+            if not disk_matches(job,volumes.get(identity,{}),role):raise FileNotFoundError(role.title()+' disk serial/interface does not match the selected volume.')
+    layout=job.get('layout','folder')
+    if layout not in ('folder','contents','full_path'):raise ValueError('Unknown folder layout.')
+    if layout!='contents':
+        normalized=ntpath.normpath(source)
+        drive,tail=ntpath.splitdrive(normalized)
+        root_name='Drive_'+re.sub(r'[^A-Za-z0-9_-]+','_',drive).strip('_')
+        suffix=(ntpath.basename(normalized.rstrip('\\')) if tail.strip('\\') else root_name) if layout=='folder' else (tail.strip('\\') or root_name)
+        destination=ntpath.join(destination,suffix)
     a,b=ntpath.normcase(ntpath.normpath(source)),ntpath.normcase(ntpath.normpath(destination))
     try: common=ntpath.commonpath([a,b])
     except ValueError:common=None
     if common in (a,b):raise ValueError('Source and destination must be separate non-nested folders.')
     return source,destination
 
-def disk_matches(job,volume):
-    serial=job.get('trigger_serial','').strip().casefold()
-    interface=job.get('trigger_interface','').strip().casefold()
+def disk_matches(job,volume,role='trigger'):
+    serial=job.get(role+'_serial','').strip().casefold()
+    interface=job.get(role+'_interface','').strip().casefold()
     if not serial and not interface:return True
     disks=volume.get('Disks') or []
     if isinstance(disks,dict):disks=[disks]

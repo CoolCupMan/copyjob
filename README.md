@@ -1,4 +1,4 @@
-# CopyJob 1.2.0 — volume-aware Windows backup jobs
+# CopyJob 1.3.0 — volume-aware Windows backup jobs
 
 Application ID: `org.copyjob.desktop`. Each installation has an independent UUID,
 configuration, log and scheduled task. Intended platform: Windows 10/11 with Windows
@@ -22,10 +22,14 @@ PowerShell 5.1, WMI/CIM and Task Scheduler. The application is unsigned.
    With no volume selected, full paths stay fixed. Use **Preview paths** to check
    the resolved source, destination and source availability without copying or
    enabling an automatic job.
-4. For physical disk matching, optionally set **Trigger disk serial** to e.g.
-   `NAASPZ2N` and **Trigger interface** to `USB`. Both must match the same physical
-   disk behind the selected trigger Volume-ID. **Use selected disk ID** fills the
-   reported values after **Refresh volumes**. Serial matching trims surrounding
+4. Trigger, source and destination each have optional serial/interface dropdowns.
+   Choose a Volume-ID, refresh volumes, then choose its reported serial/interface
+   or use that row's **Read selected disk** button. Blank means unrestricted hardware
+   matching for that Volume-ID. Values are not fixed to USB or any example serial.
+   All configured filters must match the same physical disk behind the corresponding
+   selected volume before copying. Source/destination mismatches prevent writes.
+   Devices without a usable serial use Volume-ID alone; **Read selected disk** clears
+   stale serials and fills whatever metadata the device actually reports. Serial matching trims surrounding
    spaces and ignores case. Some USB bridges report `SCSI`; use the actual reported
    interface rather than assuming USB. Missing metadata never bypasses a filter.
 5. Choose engine, switches, delay and retry interval. Enable **automatic job**, then
@@ -57,6 +61,28 @@ mutex prevents the same job running simultaneously from the GUI and the monitor.
 Use separate destinations for independent jobs/instances; different jobs targeting
 one destination are not coordinated. Sleep and WMI delays can delay detection. If Windows does not deliver events and a
 disconnect/reconnect occurs entirely between inventory scans, polling alone can miss it.
+
+## Folder hierarchy
+
+The default **Source folder and contents** layout copies the selected source folder
+itself, including its subdirectories and files, into the destination parent. Example:
+
+```text
+Source:       C:\Users\Example\Documents\ChatGPT\134g32b5rg
+Destination:  Z:\CopyJobProgramTest
+Final target: Z:\CopyJobProgramTest\134g32b5rg
+```
+
+Choose **Contents only** for the old layout, or **Full source path** to retain all
+source path components below the drive root (for example `Users\Example\...`).
+**Preview paths** shows the final destination before copying. The saved destination
+remains the parent folder, so successive runs do not append the source name repeatedly.
+Drive-root copies use a container such as `Drive_C`. Built-in, XCOPY and custom PS1
+jobs receive the same resolved layout; custom scripts must honor their destination
+variable. Subdirectory recursion/empty-directory behavior still follows the selected
+XCOPY flags (normally `/E`); choosing `/T` intentionally requests directories only.
+The default folder layout also applies to older jobs that do not have a layout field.
+Existing files copied by older versions are not moved, deleted or reorganized.
 
 ## Optional persistent WMI consumer and preferred letters
 
@@ -90,7 +116,7 @@ Letter enforcement can conflict with third-party letter managers: choose one des
 mapping. Assignment does not format, unlock or decrypt disks. Reformatting a volume
 may change its GUID, requiring updated settings. Re-export and rerun the admin setup
 when changing preferred mappings; editing JSON alone does not update the SYSTEM task.
-Preferred-letter bindings exported in 1.2.0 also preserve the saved physical disk
+Preferred-letter bindings exported in 1.3.0 also preserve the saved physical disk
 filters; the assignment task checks them before changing a letter. Unmounted volumes
 with physical filters additionally require the Windows Storage `Get-Partition` cmdlet.
 The one-time **Assign trigger letter…** button requests UAC and immediately assigns
@@ -171,7 +197,7 @@ python -m PyInstaller --clean --noconfirm --onefile --windowed --name CopyJob --
 The GitHub Actions `Windows EXE` workflow builds the same artifact. The supplied EXE
 was built using Windows Python under Wine. Automated tests cover volume remapping,
 delayed-letter prerequisites, retries, reconnect scheduling, flags and the copy engine.
-Regression tests cover exact USB/serial matching, wrong/missing physical identities,
+Regression tests cover folder layouts, source/destination identity enforcement, exact USB/serial matching, wrong/missing physical identities,
 and a same-letter reconnect with no missing-volume inventory sample. PowerShell
 inventory/event/assignment scripts are syntax checked. A GUI integration check uses
 actual native XCOPY with mocked volume inventory because

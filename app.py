@@ -64,18 +64,30 @@ def main():
     ttk.Label(frame,text='Background setup is explicit. Jobs run after sign-in and reconnect, including drive-letter changes.').pack(anchor='w')
     bar=ttk.Frame(frame);bar.pack(fill='x',pady=4)
     jobs=tk.Listbox(frame,height=4,exportselection=False);jobs.pack(fill='x')
-    vars={key:tk.StringVar() for key in ['name','source','destination','trigger_volume','source_volume','destination_volume','engine','delay','retry_seconds','extra_flags','script_path','preferred_letter','trigger_serial','trigger_interface']}
+    vars={key:tk.StringVar() for key in ['name','source','destination','trigger_volume','source_volume','destination_volume','engine','delay','retry_seconds','extra_flags','script_path','preferred_letter','trigger_serial','trigger_interface','source_serial','source_interface','destination_serial','destination_interface','layout']}
     enabled=tk.BooleanVar();flagvars={flag:tk.BooleanVar() for flag in FLAGS}
     vars['engine'].set('xcopy');vars['delay'].set('3');vars['retry_seconds'].set('60')
     controls=ttk.Frame(frame);controls.pack(fill='x')
     volume_boxes=[]
-    for row,(label,key) in enumerate([('Job name','name'),('Trigger volume','trigger_volume'),('Trigger disk serial','trigger_serial'),('Trigger interface','trigger_interface'),('Source volume','source_volume'),('Source folder','source'),('Destination volume','destination_volume'),('Destination folder','destination'),('Optional PS1 script','script_path'),('Preferred trigger letter','preferred_letter')]):
+    hardware_boxes={}
+    layouts={'Source folder and contents':'folder','Contents only':'contents','Full source path':'full_path'}
+    for row,(label,key) in enumerate([('Job name','name'),('Trigger volume','trigger_volume'),('Trigger disk serial','trigger_serial'),('Source volume','source_volume'),('Source disk serial','source_serial'),('Source folder','source'),('Destination volume','destination_volume'),('Target disk serial','destination_serial'),('Destination folder','destination'),('Optional PS1 script','script_path'),('Preferred trigger letter','preferred_letter')]):
         ttk.Label(controls,text=label,width=20).grid(row=row,column=0,sticky='w',pady=2)
         if key.endswith('volume'):
             widget=ttk.Combobox(controls,textvariable=vars[key],width=95,values=list(options));volume_boxes.append(widget)
-        elif key=='trigger_interface':widget=ttk.Combobox(controls,textvariable=vars[key],values=['','USB','SCSI','IDE','1394'],width=95)
+        elif key.endswith('_serial'):
+            role=key.split('_')[0]
+            widget=ttk.Frame(controls)
+            serial_box=ttk.Combobox(widget,textvariable=vars[key],values=[''],width=35)
+            serial_box.pack(side='left',fill='x',expand=True)
+            ttk.Label(widget,text=' Interface (optional) ').pack(side='left')
+            interface_box=ttk.Combobox(widget,textvariable=vars[role+'_interface'],values=[''],width=16)
+            interface_box.pack(side='left')
+            ttk.Button(widget,text='Read selected disk',command=lambda r=role:selected_disk(r)).pack(side='left',padx=3)
+            hardware_boxes[role]=(serial_box,interface_box)
         else:widget=ttk.Entry(controls,textvariable=vars[key],width=95)
         widget.grid(row=row,column=1,sticky='ew')
+        if key.endswith('_volume'):widget.bind('<<ComboboxSelected>>',lambda _:update_hardware_choices())
         if key in ('source','destination'):
             def browse_folder(k=key):
                 chosen=filedialog.askdirectory()
@@ -83,6 +95,10 @@ def main():
             ttk.Button(controls,text='Browse…',command=browse_folder).grid(row=row,column=2,padx=3)
     controls.columnconfigure(1,weight=1)
     ttk.Label(frame,text='Selected volume controls the drive: E:\\Backup becomes Backup and follows that volume. Without a volume ID, the full path stays fixed.').pack(anchor='w')
+    layout_row=ttk.Frame(frame);layout_row.pack(fill='x',pady=3)
+    ttk.Label(layout_row,text='Folder layout: ').pack(side='left')
+    ttk.Combobox(layout_row,textvariable=vars['layout'],values=list(layouts),state='readonly',width=28).pack(side='left')
+    ttk.Label(layout_row,text=' Destination is the parent folder; Preview paths shows the final location.').pack(side='left')
     settings=ttk.Frame(frame);settings.pack(fill='x',pady=5)
     ttk.Checkbutton(settings,text='Enable automatic job',variable=enabled).pack(side='left')
     ttk.Combobox(settings,textvariable=vars['engine'],values=['xcopy','builtin','powershell'],state='readonly',width=9).pack(side='left',padx=6)
@@ -113,9 +129,11 @@ def main():
             value=job.get(key,'')
             if key.endswith('volume'):
                 value=next((text for text,id in options.items() if id.casefold()==value.casefold()),value)
+            if key=='layout':value=next((label for label,mode in layouts.items() if mode==job.get('layout','folder')),'Source folder and contents')
             var.set(str(value))
         enabled.set(job['enabled'])
         for flag,var in flagvars.items():var.set(flag in job.get('flags',[]))
+        update_hardware_choices()
     jobs.bind('<<ListboxSelect>>',lambda _:show_job(jobs.curselection()[0]) if jobs.curselection() else None)
     def add():
         config['jobs'].append(new_job());names();jobs.selection_set(len(config['jobs'])-1);show_job(len(config['jobs'])-1)
@@ -134,17 +152,29 @@ def main():
     def stop_monitor():
         (BASE/'stop-background').touch()
         log('Monitor stop requested; an active copy finishes first. Start monitoring or save an enabled job to resume.')
-    def selected_disk():
-        value=options.get(vars['trigger_volume'].get(),vars['trigger_volume'].get())
-        try:
-            disks=volumes.get(normalize_volume(value),{}).get('Disks') or []
+    def update_hardware_choices():
+        for role,(serial_box,interface_box) in hardware_boxes.items():
+            selected_volume=options.get(vars[role+'_volume'].get(),vars[role+'_volume'].get())
+            volume=volumes.get(selected_volume.casefold(),{})
+            disks=volume.get('Disks') or []
             if isinstance(disks,dict):disks=[disks]
-            if len(disks)!=1:raise ValueError('Select a mounted trigger volume on exactly one physical disk, then refresh volumes.')
+            serial_box['values']=['',*sorted({str(d.get('SerialNumber') or '').strip() for d in disks}-{''})]
+            interface_box['values']=['',*sorted({str(d.get('InterfaceType') or '').strip() for d in disks}-{''})]
+    def selected_disk(role='trigger'):
+        value=options.get(vars[role+'_volume'].get(),vars[role+'_volume'].get())
+        try:
+            volume=volumes.get(normalize_volume(value))
+            if not volume:raise ValueError('Select a connected '+role+' volume and refresh first.')
+            disks=volume.get('Disks') or []
+            if isinstance(disks,dict):disks=[disks]
+            vars[role+'_serial'].set('');vars[role+'_interface'].set('')
+            if len(disks)!=1:
+                log(role+': no single physical disk identity; using Volume-ID only.')
+                return
             serial=str(disks[0].get('SerialNumber') or '').strip()
-            if not serial:raise ValueError('This disk does not report a serial number. Use its Volume-ID instead.')
-            vars['trigger_serial'].set(serial)
-            vars['trigger_interface'].set(str(disks[0].get('InterfaceType') or '').strip())
-            log('Selected disk: '+str(disks[0].get('Model') or '')+'; serial '+serial)
+            interface=str(disks[0].get('InterfaceType') or '').strip()
+            vars[role+'_serial'].set(serial);vars[role+'_interface'].set(interface)
+            log(role+': '+str(disks[0].get('Model') or '')+'; serial '+(serial or 'not reported — using Volume-ID')+'; interface '+(interface or 'any'))
         except Exception as exc:error(exc)
     def store(start_automatic=True):
         if selected is None:raise ValueError('Add or select a job first.')
@@ -152,6 +182,7 @@ def main():
         for key,var in vars.items():
             value=var.get().strip()
             if key.endswith('volume'):value=options.get(value,value);normalize_volume(value)
+            if key=='layout':value=layouts.get(value,value)
             job[key]=value
         for key in ['delay','retry_seconds']:
             job[key]=float(job[key])
@@ -161,7 +192,8 @@ def main():
         for key in ('source','destination'):
             job[key]=volume_folder(job[key]) if job.get(key+'_volume') else clean_folder(job[key])
             vars[key].set(job[key])
-        if (job.get('trigger_serial') or job.get('trigger_interface')) and not job.get('trigger_volume'):raise ValueError('Choose a trigger Volume-ID when setting physical disk filters.')
+        for role in ('trigger','source','destination'):
+            if (job.get(role+'_serial') or job.get(role+'_interface')) and not job.get(role+'_volume'):raise ValueError('Choose a '+role+' Volume-ID when setting hardware filters.')
         job['preferred_letter']=job.get('preferred_letter','').upper().rstrip(':')
         if job['preferred_letter'] and (job['preferred_letter'] not in 'DEFGHIJKLMNOPQRSTUVWXYZ' or len(job['preferred_letter'])!=1 or not job['trigger_volume']):raise ValueError('Preferred letter needs a trigger volume ID and one letter D–Z.')
         if job['engine']=='xcopy':xcopy_flags(job)
@@ -171,9 +203,9 @@ def main():
         return job
     def preview():
         draft=dict(config['jobs'][selected]) if selected is not None else {}
-        for key in ('trigger_volume','source_volume','destination_volume','source','destination'):
+        for key in ('trigger_volume','source_volume','destination_volume','source','destination','trigger_serial','trigger_interface','source_serial','source_interface','destination_serial','destination_interface','layout'):
             value=vars[key].get().strip()
-            draft[key]=options.get(value,value) if key.endswith('volume') else value
+            draft[key]=options.get(value,value) if key.endswith('volume') else layouts.get(value,value) if key=='layout' else value
         def worker():
             try:
                 source,destination=win.prepare_job(draft,win.inventory())
@@ -266,7 +298,7 @@ def main():
             (target/'instance.json').write_text(json.dumps(identity,indent=2),encoding='utf-8')
             messagebox.showinfo('Installed',f'Run {target / "CopyJob.exe"}. This instance has separate jobs, UUID and startup settings.')
         except Exception as exc:error(exc)
-    for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Use selected disk ID',selected_disk),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
+    for text,command in [('Add job',add),('Delete job',remove),('Refresh volumes',refresh),('Use selected disk ID',lambda:selected_disk('trigger')),('Assign trigger letter…',assign),('Install independent instance…',install)]:ttk.Button(bar,text=text,command=command).pack(side='left',padx=2)
     for text,command in [('Save job',safe_store),('Preview paths',preview),('Copy now',run),('Cancel manual copy',cancelled.set),('Show installed XCOPY options',help_flags)]:ttk.Button(actions,text=text,command=command).pack(side='left',padx=2)
     for text,command in [('Start monitoring',start_monitor),('Stop monitoring',stop_monitor),('Enable login startup',startup),('Remove login startup',lambda:startup(True)),('Pause / resume background',pause),('Export WMI setup…',export_wmi)]:ttk.Button(backgroundbar,text=text,command=command).pack(side='left',padx=2)
     def tick():
